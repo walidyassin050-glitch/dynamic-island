@@ -1,0 +1,31 @@
+# --- build output ---
+[Bb]in/
+[Oo]bj/
+Published/
+publish/
+
+# --- Visual Studio & IDE ---
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# --- packaging: local scripts & generated package folders ---
+msix/
+msix-package/
+install-only_*.ps1
+publish-app.bat
+trust-cert.bat
+
+# --- signing material: a private key must NEVER be committed ---
+*.pfx
+*.pvk
+*.snk
+
+# --- misc junk ---
+TestResults/
+*.binlog
+Thumbs.db
+desktop.ini
+*.tmp
