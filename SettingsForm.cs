@@ -232,40 +232,25 @@ namespace MyDynamicIsland
                 catch { }
             };
             body.Controls.Add(privacy);
-            var update = Link("\u22a7 Check GitHub for an updated version");
-            update.Location = new Point(body.Left + 24, privacy.Bottom + 2);
-            update.Click += async (_, _) =>
+            var sim = Link("\u25cf Simulate a notification (toast tester)");
+            sim.Location = new Point(body.Left + 24, privacy.Bottom + 2);
+            int simN = 0;
+            string[][] simFeed =
             {
-                update.Enabled = false;
-                update.Text = "Checking GitHub\u2026";
-                var rel = await IslandDownloads.CheckGitHubUpdateAsync(
-                    "walidyassin050-glitch/my-dynamic-island");
-                update.Enabled = true;
-                if (rel == null)
-                {
-                    update.Text = "You are on the newest published version.";
-                    return;
-                }
-                var yes = MessageBox.Show(this,
-                    $"Version {rel.Value.tag} is available. Download {rel.Value.file} to your Downloads folder?",
-                    "Update", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (yes != DialogResult.Yes)
-                {
-                    update.Text = "Download skipped \u2014 the island kept its manners.";
-                    return;
-                }
-                string dest = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    "Downloads", rel.Value.file);
-                IslandDownloads.Start(rel.Value.url, dest, rel.Value.file);
-                update.Text = "Downloading \u2014 live progress is on the island.";
+                new[] { "WhatsApp", "Yassine: are we still on for tonight? The plan changed a bit" },
+                new[] { "Outlook", "Q3 budget review moved to Friday 10:30 — conference room B" },
+                new[] { "Spotify", "Your Premium trial ends in 3 days — tap to renew" },
+                new[] { "Realtek Audio", "Headphones connected \u2014 default output switched" },
             };
-            body.Controls.Add(update);
-            var demo = Link("\u25b7 Preview the download page (simulated transfer)");
-            demo.Location = new Point(body.Left + 24, update.Bottom + 2);
-            demo.Click += (_, _) => IslandDownloads.StartDemo();
-            body.Controls.Add(demo);
-            y = demo.Bottom + 16;
+            sim.Click += (_, _) =>
+            {
+                var n = simFeed[simN % simFeed.Length];
+                simN++;
+                Form1.SimulateNotification(n[0], n[1]);
+                sim.Text = "\u25cf Sent: " + n[0] + " — watch the top edge";
+            };
+            body.Controls.Add(sim);
+            y = sim.Bottom + 16;
 
             // ═══ INTELLIGENCE ═══
             y = SectionTitle(body, "Intelligence", "the search page's two wires", y);
@@ -450,16 +435,52 @@ namespace MyDynamicIsland
                 get => contentHeight;
                 set { contentHeight = value; AutoScrollMinSize = new Size(0, Math.Max(value, Height)); Invalidate(); }
             }
+            WheelForwarder? wheelFilter;
             public SectionPanel()
             {
                 DoubleBuffered = true;
                 BackColor = GlassBack;
                 AutoScroll = true;
             }
+            protected override void Dispose(bool disposing)
+            {
+                wheelFilter?.Detach();
+                wheelFilter = null;
+                base.Dispose(disposing);
+            }
+
+            // The real scroll-lag leftover: WinForms delivers WM_MOUSEWHEEL to
+            // the control under the cursor, so over any toggle, text box or
+            // card the panel's smooth AutoScroll never fired — only bare gaps
+            // scrolled this page. The filter reroutes every wheel message
+            // that lands anywhere inside the panel back to the panel itself.
+            sealed class WheelForwarder : IMessageFilter
+            {
+                const int WM_MOUSEWHEEL = 0x020A;
+                readonly SectionPanel panel;
+                public WheelForwarder(SectionPanel p) { panel = p; Application.AddMessageFilter(this); }
+                public void Detach() => Application.RemoveMessageFilter(this);
+                public bool PreFilterMessage(ref Message m)
+                {
+                    if (m.Msg != WM_MOUSEWHEEL) return false;
+                    var target = Control.FromChildHandle(m.LParam);
+                    if (target == null || ReferenceEquals(target, panel)) return false;
+                    for (Control? c = target; c != null; c = c.Parent)
+                        if (ReferenceEquals(c, panel))
+                        {
+                            SendMessage(panel.Handle, WM_MOUSEWHEEL, m.WParam, IntPtr.Zero);
+                            return true;
+                        }
+                    return false;
+                }
+                [System.Runtime.InteropServices.DllImport("user32.dll")]
+                static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+            }
             protected override void OnHandleCreated(EventArgs e)
             {
                 base.OnHandleCreated(e);
                 HideBars();
+                wheelFilter ??= new WheelForwarder(this);
             }
             protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); HideBars(); }
             void HideBars()

@@ -34,11 +34,10 @@ namespace MyDynamicIsland
         private MMDevice? device;
         private readonly LyricService lyrics = new();
 
-        // The acoustic layer of word sync: fed by the same loopback capture
-        // that drives the waveform, it lets the actual sung attacks move the
-        // glow a word at most in either direction of the time-proportional
-        // estimate. YouTube Music's per-word times (LyricService) override it
-        // entirely when they arrive. Both are invisible when absent.
+        // ═══ LYRICS: DORMANT BY DESIGN ═══ every field and renderer
+        // below is kept intact but nothing calls it — the island paint path
+        // simply never draws a lyric row. Revive by re-wiring a caller when
+        // the presentation gets redesigned; nothing else needs touching.
         private readonly WordAligner voice = new();
 
         // The lyric slot sits in the text column between the artist row (ends
@@ -72,6 +71,37 @@ namespace MyDynamicIsland
         // Rest and hover share one width. PeekTopRowHeight preserves the compact
         // media row while hover grows downward to reveal the title.
         private const int PeekTopRowHeight = 32;
+        // ═ EDIT ME — the top of the shape, in ABSOLUTE PIXELS (what you
+        // see is what you set; cards no longer saturate silent clamps).
+        // Pill and card values are INDEPENDENT, so tuning one leaves the
+        // other exactly as it is.
+        //   Shoulder = how far the sides flare sideways at the screen edge
+        //   ShoulderY = how deep that curve runs down before straight sides
+        //   Set both to 0 for a shape that meets the edge with square corners.
+        // Chosen in the Top-shape lab: zero flare everywhere — the island
+        // meets the screen edge as a clean-cut rectangle, no notch wings.
+        private const float PillShoulder  = 0f;
+        private const float PillShoulderY = 0f;
+        private const float CardShoulder  = 0f;
+        private const float CardShoulderY = 0f;
+
+        // Curve tension between the flat top and the straight sides:
+        // ~0.2 = boxy stepped shoulder, 1 = current smooth sweep, ~2 = winged
+        // swoop that overshoots before settling. Safe 0.2..2.2.
+        // (inert while the shoulders are 0 — kept live for whenever they're not)
+        private const float NotchSmooth = 0.2f;
+
+        // ═ EDIT ME — the single knob for every expanded card's bottom-corner
+        // roundness (weather, music, ask, download and the popups that mimic
+        // them). 28 was the old fixed value; smaller = squarer. The sky wash
+        // clip follows it automatically, so corners never leak a mismatch.
+        private const int CardCorner = 20;   // dialed in by you
+
+        // Pill-family corner (resting pill, peek, mini strip) — the progress
+        // timeline outline derives its arc radius from THIS, so the line can
+        // never drift off the silhouette again.
+        private const int PillCorner = 7;    // dialed in by you
+
         private readonly Size restingSize = new(283, 46);
         private readonly Size peekSize = new(283, 72);
         private readonly Size fullSize = new(478, 172);
@@ -584,17 +614,22 @@ namespace MyDynamicIsland
         // rests on the active page, a click opens it, and the wheel — or a
         // tap on the fixed indicator dots along the card's right edge —
         // moves between pages.
-        private enum IslandMode { Media, Search, Today }
+        private enum IslandMode { Media, Search, Today, Download }
         private IslandMode activeMode = IslandMode.Media;
         private int pageIndex = 0;
 
-        private int PageCount() => 3;
+        // The progress page only exists while something is actually
+        // transferring — the wheel, the dots and every clamp follow this
+        // single line, so pages go 3 → 4 → 3 on their own.
+        private int PageCount() =>
+            IslandDownloads.Current is { Active: true } ? 4 : 3;
 
         private IslandMode PageAt(int index) => index switch
         {
             0 => IslandMode.Media,
             1 => IslandMode.Search,
-            _ => IslandMode.Today,
+            2 => IslandMode.Today,
+            _ => IslandMode.Download,
         };
 
         // Wheel physics for page turns: a single notch turns one page — the
@@ -826,6 +861,10 @@ namespace MyDynamicIsland
         private readonly Size callSize = new Size(360, 96);
         private readonly Size replySize = new Size(380, 130);
         private readonly Size askSize = new Size(380, 100);
+
+        // The chosen toast flow: quiet line → click → full card (no reply bar)
+        private readonly Size toastMiniSize = new Size(283, 48);
+        private readonly Size toastBigSize = new Size(380, 93);
         // Self-drawn input text: a layered (UpdateLayeredWindow) window cannot
         // host a real TextBox at all - child controls never composite onto it.
         // (The old replyBox suffered the same silent invisibility.) So the
@@ -920,6 +959,7 @@ namespace MyDynamicIsland
             sizeAnimationStart = restingSize;
             WireDownloads();
             BrowserDownloads.Start();
+            WireSimulator();
 
             StartPosition = FormStartPosition.Manual;
             anchorScreen = Screen.FromPoint(Cursor.Position);
@@ -1628,16 +1668,24 @@ namespace MyDynamicIsland
             float top = rect.Top;
             float right = rect.Right;
             float bottom = rect.Bottom;
-            float shoulder = Math.Clamp(rect.Width * 0.045f, 9f, 18f);
-            float shoulderY = Math.Clamp(rect.Height * 0.2f, 11f, 27f);
+            bool pillish = rect.Height <= 70;
+            float shoulder = pillish ? PillShoulder : CardShoulder;
+            float shoulderY = pillish ? PillShoulderY : CardShoulderY;
+            // impossible-value safety nets only (no more silent caps at
+            // everyday sizes): flare can't eat more than a third of the
+            // width or 45% of the height.
+            shoulder = Math.Clamp(shoulder, 0f, rect.Width / 3f);
+            shoulderY = Math.Clamp(shoulderY, 0f, rect.Height * 0.45f);
+            float tension = Math.Clamp(NotchSmooth, 0.2f, 2.2f);
+            float ctrlX = 0.35f * tension, ctrlY = 0.38f * tension;
             float r = Math.Min(radius, Math.Min(rect.Width, rect.Height) / 2f);
 
             path.StartFigure();
             path.AddLine(left + shoulder, top, right - shoulder, top);
             path.AddBezier(
                 right - shoulder, top,
-                right - shoulder * 0.35f, top,
-                right, top + shoulderY * 0.38f,
+                right - shoulder * Math.Min(ctrlX, 1f), top,
+                right, top + shoulderY * Math.Min(ctrlY, 1f),
                 right, top + shoulderY);
             path.AddLine(right, top + shoulderY, right, bottom - r);
             path.AddArc(right - r * 2, bottom - r * 2, r * 2, r * 2, 0, 90);
@@ -1646,8 +1694,8 @@ namespace MyDynamicIsland
             path.AddLine(left, bottom - r, left, top + shoulderY);
             path.AddBezier(
                 left, top + shoulderY,
-                left, top + shoulderY * 0.38f,
-                left + shoulder * 0.35f, top,
+                left, top + shoulderY * Math.Min(ctrlY, 1f),
+                left + shoulder * Math.Min(ctrlX, 1f), top,
                 left + shoulder, top);
             path.CloseFigure();
             return path;
@@ -1911,6 +1959,32 @@ namespace MyDynamicIsland
             if (InvokeRequired) BeginInvoke((Action)Apply); else Apply();
         }
 
+        // ── notification simulator (Settings ▸ toast tester) ──
+        // Works in every build, packaged or portable, because the fake enters
+        // through the same door the watcher uses — no OS listener involved.
+        public static event Action<string, string>? SimulatedNotification;
+        public static void SimulateNotification(string app, string message) =>
+            SimulatedNotification?.Invoke(app, message);
+
+        private bool simWired;
+        private void WireSimulator()
+        {
+            if (simWired) return;
+            simWired = true;
+            SimulatedNotification += (app, msg) =>
+            {
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        toastAppIcon = null;   // fallback tile: initial + tint
+                        ShowSystemActivity(app, msg, TransientKind.Notification, 5500);
+                    }));
+                }
+                catch { }
+            };
+        }
+
         private void ShowSystemActivity(string title, string detail, TransientKind kind, int durationMs)
         {
             // Same-card dedupe: the wifi poll, NLA event, DBT broadcast and
@@ -1936,6 +2010,7 @@ namespace MyDynamicIsland
             // readout — so the setting only gates what the collapsed pill
             // shows and the alerts. The clamp just keeps the index honest.
             pageIndex = Math.Clamp(pageIndex, 0, PageCount() - 1);
+            activeMode = PageAt(pageIndex);
 
             if (appSettings.MediaActivity && !mediaEventsEnabled)
             {
@@ -2342,14 +2417,12 @@ namespace MyDynamicIsland
                     return downloadSize;
 
                 if (transientKind == TransientKind.Notification)
-                    return askSize;   // the iOS card speaks ask-page dimensions
+                    return notificationExpanded ? toastBigSize : toastMiniSize;
 
                 if (transientKind == TransientKind.Volume || transientKind == TransientKind.Brightness)
-                    // One shared slider-tile silhouette for volume & brightness.
-                    // Once a 356x84 slab — now close to the footprint of the
-                    // card's own volume strip, so it reads as a sibling of the
-                    // island's parts instead of a billboard over them.
-                    return new Size(330, 62);
+                    // v4 (reference-approved): nothing opens — the level simply
+                    // happens TO the pill at its resting 283x46 size.
+                    return restingSize;
 
                 // Text notifications open narrow and expand downward on click.
                 return NotificationShowing ? NotificationSize
@@ -2365,6 +2438,8 @@ namespace MyDynamicIsland
                     return askSize;
                 if (activeMode == IslandMode.Today)
                     return todaySize;
+                if (activeMode == IslandMode.Download)
+                    return downloadSize;
 
                 // The media page: base card, the queue extension when it's
                 // open, and the volume strip when that's up too.
@@ -2386,7 +2461,7 @@ namespace MyDynamicIsland
             // Search answers a hover with its pill glyph, never expansion.
             if (hovering || ShowAnnouncement)
             {
-                if (activeMode == IslandMode.Search)
+                if (activeMode is IslandMode.Search or IslandMode.Download)
                     return restingSize;
                 return GetPeekSize();
             }
@@ -2396,17 +2471,8 @@ namespace MyDynamicIsland
 
         // Layout constants for the Sneak Peek's pinned top row + the
         // marquee row that grows in below it.
-        // *** MARQUEE TEXT BOUNDS ***
-        // Pick one of these pairs (or set your own two numbers) for where
-        // the Sneak Peek title starts and ends:
-        //   A) Snug, edge-to-edge (current default):   Left = 6,   Right = 6
-        //   B) Aligned to the icon row above it:        Left = 7,   Right = 34
-        //      (7 lines up with the album art's left edge; 34 keeps clear
-        //      of the waveform glyph sitting above on the right)
-        //   C) Wide, minimal padding:                   Left = 4,   Right = 4
-        // Option B — aligned to the icon row above (7 lines up with the
-        // album art's left edge; 34 keeps clear of the waveform glyph
-        // sitting above on the right).
+        // Sneak Peek marquee right margin — keeps the scrolled title clear
+        // of the waveform glyph at the pill's right edge.
         private const int PeekTextRightMargin = 34;
 
         private Size GetPeekSize() => peekSize;
@@ -2500,7 +2566,15 @@ namespace MyDynamicIsland
 
             if (ToastHud)
             {
-                holding = false;
+                if (!notificationExpanded)
+                {
+                    notificationExpanded = true;
+                    holdUntil = DateTime.Now.AddMilliseconds(6500);
+                }
+                else
+                {
+                    holding = false;
+                }
                 RefreshVisual();
                 return;
             }
@@ -2526,6 +2600,23 @@ namespace MyDynamicIsland
                 SettingsRequested?.Invoke();
                 return;
             }
+            // Transport chip first — a hover-summoned button must win over
+            // the generic expand/collapse under it.
+            if (!clicked && !holding && waveHover &&
+                GetWaveHitRect().Contains(e.Location) &&
+                !string.IsNullOrWhiteSpace(mediaText))
+            {
+                // Same optimistic flip the expanded card's button uses — the
+                // bead changes glyph the instant it is tapped; the OS session
+                // event corrects it if the player disagreed.
+                isPlaying = !isPlaying;
+                basePosition = GetCurrentPosition();
+                basePositionStamp = DateTime.Now;
+                _ = mediaWatcher.TogglePlayPauseAsync();
+                RefreshVisual();
+                return;
+            }
+
             // Tapping the artwork opens the app the media is playing from,
             // instead of expanding/collapsing the card. Works in the resting
             // pill and the peek alike — both draw the same left-edge thumbnail.
@@ -2539,6 +2630,21 @@ namespace MyDynamicIsland
             // Expanded page content: the indicator handled above owns the
             // right strip; HandleExpandedClick keeps its hit-testing to the
             // active page so a tap in dead space collapses the card.
+            // The progress page shares the media card's exact footprint —
+            // its controls MUST be consulted before HandleExpandedClick, or
+            // the media play/next hitzones answer through the card on top.
+            if (clicked && activeMode == IslandMode.Download)
+            {
+                if (DownloadPageClick(e.Location))
+                {
+                    RefreshVisual();
+                    return;
+                }
+                clicked = false;
+                collapseAt = null;
+                RefreshVisual();
+                return;
+            }
             if (CardShowing && HandleExpandedClick(e.Location))
                 return;
             clicked = !clicked;
@@ -2563,7 +2669,6 @@ namespace MyDynamicIsland
             }
             else if (DownloadHudActive)
             {
-                downloadDismissedPhase = IslandDownloads.Current?.Phase ?? "";
                 holding = false;
                 RefreshVisual();
             }
@@ -2778,6 +2883,7 @@ namespace MyDynamicIsland
         private void Form1_MouseMove(object sender, MouseEventArgs e)
         {
             UpdateHoverState();
+            UpdateWaveHover(e.Location);
             if (draggingProgress)
                 PreviewSeek(e.X);
         }
@@ -3274,15 +3380,14 @@ namespace MyDynamicIsland
 
         private Rectangle GetHudTrackCoreRect()
         {
-            int trackX = 14 + 24 + 12;
-            return new Rectangle(trackX, (Height - 7) / 2,
-                Math.Max(30, PillWidth - trackX - 16), 7);
+            int railW = Math.Max(60, (int)(PillWidth * 0.40f));
+            return new Rectangle(PillWidth - 12 - railW, (Height - 4) / 2, railW, 4);
         }
 
         private Rectangle GetHudTrackRect()
         {
             var r = GetHudTrackCoreRect();
-            r.Inflate(0, 12);
+            r.Inflate(0, 16);   // a 4px rail is unflickable without a runway
             return r;
         }
 
@@ -3324,7 +3429,6 @@ namespace MyDynamicIsland
             {
                 loopbackCapture = new WasapiLoopbackCapture();
                 loopbackCapture.DataAvailable += LoopbackCapture_DataAvailable;
-                voice.SourceLive = true;
                 loopbackCapture.RecordingStopped += (_, __) =>
                 {
                     // Optional cleanup...
@@ -3334,7 +3438,6 @@ namespace MyDynamicIsland
             catch
             {
                 loopbackCapture = null;
-                voice.SourceLive = false;
             }
         }
 
@@ -3376,7 +3479,6 @@ namespace MyDynamicIsland
                         env += sample; envN++;
                     }
                 }
-                if (envN > 0) voice.Push(WordAligner.NowMs, env / envN);   // loudness for word sync
 
                 lock (audioMeterLock)
                 {
@@ -3427,11 +3529,6 @@ namespace MyDynamicIsland
 
             // New track, new words (and the previous song's line is cleared
             // immediately so it cannot flash under the one that replaced it).
-            lyricShownIndex = -1;
-            lyricPreviousIndex = -1;
-            lyricMarqueeOffset = 0f;
-            lyricPreviousMarqueeOffset = 0f;
-            lyricTransitionStartedAt = DateTime.MinValue;
 
             // Duration is deliberately NOT sent. At this instant trackDuration
             // still holds the *previous* song's length (the timeline event lands
@@ -3563,13 +3660,10 @@ namespace MyDynamicIsland
             if (CardShowing && hasTrack)
             {
                 fullMarqueeOffset += 0.45F;
-                if (lyrics.HasLyrics)
-                    lyricMarqueeOffset += LyricMarqueeSpeed;
             }
             else if (!CardShowing)
             {
                 fullMarqueeOffset = 0f;
-                lyricMarqueeOffset = 0f;
             }
 
             if (PeekShowing && hasTrack)
@@ -3746,14 +3840,9 @@ namespace MyDynamicIsland
             IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
 
         // --- Layered window (per-pixel alpha) ---
-        // Replaces Region-based hard-edge clipping. A Region only lets a
-        // pixel be fully opaque or fully invisible, which is why the
-        // progress-outline glow could never actually appear OUTSIDE the
-        // pill's silhouette — anything past the Region boundary was simply
-        // clipped away regardless of what was drawn there. UpdateLayeredWindow
-        // instead composites a full 32bpp ARGB bitmap with true per-pixel
-        // alpha, so a soft glow can genuinely fade out past the pill's edge
-        // onto the desktop behind it.
+        // A Region clip only lets a pixel be fully opaque or fully invisible.
+        // UpdateLayeredWindow composites a full 32bpp ARGB bitmap with true
+        // per-pixel alpha instead, so soft edges fade honestly to the desktop.
         private const int WS_EX_LAYERED = 0x80000;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int GWL_EXSTYLE = -20;
@@ -3928,11 +4017,11 @@ namespace MyDynamicIsland
             // pill's 15px radius and its flatter shoulder curve, so a 146px-tall
             // body rendered as a boxy slab with the bottom row clipped. The
             // compact strip stays on the pill radius, because it IS the pill.
-            int cornerRadius = DownloadHudActive ? 21
-                : clicked || overlay != OverlayKind.None || ShowWelcome ||
-                  (NotificationShowing && notificationExpanded)
-                    ? Math.Min(28, Height / 2)
-                    : Math.Min(12, Height / 2);
+            int cornerRadius = DownloadHudActive || clicked ||
+                overlay != OverlayKind.None || ShowWelcome ||
+                (NotificationShowing && notificationExpanded)
+                    ? Math.Min(CardCorner, Height / 2)
+                    : Math.Min(PillCorner, Height / 2);
             using (var pillPath = AttachedNotchPath(bounds, cornerRadius))
                 FillLiquidGlass(g, pillPath, bounds);
 
@@ -3970,7 +4059,10 @@ namespace MyDynamicIsland
                 else if (transientKind == TransientKind.Brightness)
                     DrawSliderHud(g, false);
                 else if (transientKind == TransientKind.Notification)
-                    DrawToastCard(g);
+                {
+                    if (notificationExpanded) DrawToastCard(g);
+                    else DrawToastMini(g);
+                }
                 else if (transientKind == TransientKind.Download)
                     DrawDownloadCard(g);
                 else
@@ -4017,6 +4109,15 @@ namespace MyDynamicIsland
 
         private void DrawActiveModeContentInner(Graphics g)
         {
+            if (activeMode == IslandMode.Download)
+            {
+                // While selected, the progress card IS the page; resting and
+                // peek defer to the media drawing (plus the mini ring chip).
+                if (clicked) DrawDownloadCard(g);
+                else DrawCollapsedMedia(g);
+                return;
+            }
+
             if (activeMode == IslandMode.Today)
             {
                 // Expanded: weather + agenda. Collapsed: the clock and the
@@ -4170,7 +4271,8 @@ namespace MyDynamicIsland
             float top = inset;
             float left = inset;
             float right = PillWidth - inset - 1f;
-            float radius = Math.Min(12f, (Height - inset * 2f) / 2f);
+            // follows the actual pill corner constant — outline hugs the edge it traces
+            float radius = Math.Min(PillCorner, (Height - inset * 2f) / 2f);
             const int arcSamples = 16;
             var pts = new List<PointF>(arcSamples * 2 + 5)
             {
@@ -4243,8 +4345,6 @@ namespace MyDynamicIsland
             const int left = 14;
             var iconRect = new Rectangle(left, (rowHeight - iconSize) / 2, iconSize, iconSize);
 
-            // same signature glow, scaled to the thumbnail, resting/peek too
-
             Image? art = albumArtBox.Image ?? appIconBadge.Image;
             if (art != null)
             {
@@ -4262,10 +4362,62 @@ namespace MyDynamicIsland
                 g.FillEllipse(dotBrush, left + iconSize / 2 - 4, rowHeight / 2 - 4, 8, 8);
             }
 
-            // Fully collapsed means exactly two things: artwork on the left
-            // and the live visualizer on the right.
+            // Resting stays exactly two things: artwork and the live
+            // visualizer. The song name belongs to the peek band below.
             var waveRect = new Rectangle(PillWidth - 52, 0, 34, rowHeight);
-            DrawMiniWaveform(g, waveRect, 7);
+
+            bool hasTitle = !string.IsNullOrWhiteSpace(mediaText);
+
+            if (waveHover && hasTitle && !clicked && rowHeight >= 40)
+                DrawTransportChip(g, waveRect, rowHeight);
+            else
+                DrawMiniWaveform(g, waveRect, 7);
+        }
+
+        // Liquid-glass transport bead: the SAME FillLiquidGlass that renders
+        // the island body, cropped to a 27px disc — no rim stroke (the
+        // transparent-border request), one crisp white glyph on top.
+        private void DrawTransportChip(Graphics g, Rectangle waveRect, int rowHeight)
+        {
+            const int d = 27;
+            var chipRect = new Rectangle(waveRect.X + (waveRect.Width - d) / 2 + 3,
+                (rowHeight - d) / 2, d, d);
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                path.AddEllipse(chipRect);
+                var bounds = new Rectangle(0, 0, Math.Max(1, PillWidth - 1), Math.Max(1, Height - 1));
+                FillLiquidGlass(g, path, bounds);
+            }
+            using var glyph = new SolidBrush(Color.White);
+            float cx = chipRect.X + d / 2f + 0.5f, cy = chipRect.Y + d / 2f;
+            if (isPlaying)   // live SMTC transport state, not the icon cache
+            {
+                g.FillRectangle(glyph, cx - 4.6f, cy - 5.5f, 3.4f, 11f);
+                g.FillRectangle(glyph, cx + 1.2f, cy - 5.5f, 3.4f, 11f);
+            }
+            else
+                g.FillPolygon(glyph, new[]
+                {
+                    new PointF(cx - 3.6f, cy - 6f), new PointF(cx + 6f, cy),
+                    new PointF(cx - 3.6f, cy + 6f),
+                });
+        }
+
+        private bool waveHover;
+        private Rectangle GetWaveHitRect() =>
+            new(PillWidth - 66, 0, 56, Math.Min(Height, restingSize.Height));
+
+        private void UpdateWaveHover(Point local)
+        {
+            bool want = hovering && !clicked && !holding &&
+                overlay == OverlayKind.None &&
+                activeMode == IslandMode.Media &&
+                !string.IsNullOrWhiteSpace(mediaText) &&
+                GetWaveHitRect().Contains(local);
+            if (want == waveHover) return;
+            waveHover = want;
+            if (Control.MouseButtons != MouseButtons.Left)
+                RefreshVisual();
         }
 
         // Sneak Peek keeps the resting width and grows downward. Its media row
@@ -4273,12 +4425,14 @@ namespace MyDynamicIsland
         // marquee title row. No progress outline here — that's collapsed-only.
         private void DrawPeekMedia(Graphics g)
         {
-            DrawCollapsedMediaRow(g, PeekTopRowHeight);
+            // The media row is a perfect copy of the resting one — same
+            // height passed, same pixels — the peek adds ONLY the band below.
+            DrawCollapsedMediaRow(g, restingSize.Height);
 
             string song = string.IsNullOrWhiteSpace(mediaText) ? "No media playing" : mediaText;
             const int sidePadding = 16;
-            var textRow = new Rectangle(sidePadding, PeekTopRowHeight,
-                Math.Max(1, PillWidth - sidePadding * 2), Height - PeekTopRowHeight);
+            var textRow = new Rectangle(sidePadding, restingSize.Height,
+                Math.Max(1, PillWidth - sidePadding * 2), Height - restingSize.Height);
 
             // Hard stop pinned to PillWidth itself (not just the margin-
             // derived textRow width) — this is what stops the peek marquee
@@ -4297,7 +4451,6 @@ namespace MyDynamicIsland
             if (!hasTrack)
             {
                 DrawCollapsedMediaRow(g, Height);
-                DrawDownloadChip(g);
                 return;
             }
 
@@ -4311,7 +4464,6 @@ namespace MyDynamicIsland
                     GetCurrentPosition().TotalSeconds / trackDuration.TotalSeconds, 0d, 1d);
                 DrawProgressOutline(g, progress, albumAccentColor);
             }
-            DrawDownloadChip(g);
         }
 
         // --- Page indicator ---
@@ -4502,7 +4654,7 @@ namespace MyDynamicIsland
 
             var state = g.Save();
             var bounds = new Rectangle(0, 0, Math.Max(1, PillWidth - 1), Math.Max(1, Height - 1));
-            using (var np = AttachedNotchPath(bounds, Math.Min(28, Height / 2)))
+            using (var np = AttachedNotchPath(bounds, Math.Min(CardCorner, Height / 2)))
                 g.SetClip(np, CombineMode.Intersect);
             using (var attrs = new System.Drawing.Imaging.ImageAttributes())
             {
@@ -4539,6 +4691,18 @@ namespace MyDynamicIsland
             Math.Min(255, c.R * 10 / 255 + 9),
             Math.Min(255, c.G * 11 / 255 + 11),
             Math.Min(255, c.B * 17 / 255 + 28));
+
+        // Character trim for GDI+ draw paths (TextRenderer's EndEllipsis
+        // isn't available there).
+        private static string TrimToFit(Graphics g, string text, Font fnt,
+            StringFormat fmt, int maxPx)
+        {
+            if (g.MeasureString(text, fnt, int.MaxValue, fmt).Width <= maxPx) return text;
+            string cut = text;
+            while (cut.Length > 1 && g.MeasureString(cut + "…", fnt, int.MaxValue, fmt).Width > maxPx)
+                cut = cut[..^1];
+            return cut.TrimEnd() + "…";
+        }
 
         // Chrome's reload: an open ring whose endpoint wears a proper arrow
         // head pointing along the clockwise tangent, gap centred on top.
@@ -4660,27 +4824,41 @@ namespace MyDynamicIsland
                 Math.Max(1, weatherCol.Width - (weatherIconRect.Right + 8) - 6), 30);
             DrawTextAt(g, temp, 14F, FontStyle.Bold, Color.White, tempRect, false);
 
+            // The sky wash sits BEHIND this column: near-black on the light
+            // day canvas, white on the night one — same rule iOS weather uses
+            // for text over its own gradients.
+            Color wxInk = weatherIsDay
+                ? Color.FromArgb(12, 20, 26)
+                : Color.FromArgb(240, 245, 250);
+
             var refresh = GetWeatherRefreshRect();
             string cityLine = string.IsNullOrWhiteSpace(weatherCity)
                 ? "Unknown place — set a city in Settings" : weatherCity;
             int cityMax = Math.Max(30, refresh.X - weatherCol.X - 14);
-            for (float fs = 8.5F; ; fs -= 0.4F)
+            // GDI+ (not TextRenderer) with grayscale anti-aliasing: ClearType
+            // drawn into the layered-window bitmap is what made these two
+            // lines crunchy over the colored sky. Start sizes big and let the
+            // shrink loop find the true fit.
+            var hint0 = g.TextRenderingHint;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            using (var inkB = new SolidBrush(wxInk))
+            using (var fmt = new StringFormat(StringFormat.GenericTypographic))
             {
-                var fnt = CachedFont("Segoe UI", fs, FontStyle.Bold);
-                int cwpx = TextRenderer.MeasureText(g, cityLine, fnt,
-                    new Size(int.MaxValue, 16),
-                    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
-                bool lastTry = fs <= 6.9F;
-                if (cwpx <= cityMax || lastTry)
+                fmt.FormatFlags |= StringFormatFlags.NoWrap;
+                fmt.LineAlignment = StringAlignment.Center;
+                for (float fs = 11F; ; fs -= 0.5F)
                 {
-                    TextRenderer.DrawText(g, cityLine, fnt,
-                        new Rectangle(weatherCol.X + 6, h - 40, cityMax, 16),
-                        Color.FromArgb(205, 222, 226, 234),
-                        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
-                        | TextFormatFlags.VerticalCenter | (lastTry ? TextFormatFlags.EndEllipsis : (TextFormatFlags)0));
+                    var fnt = CachedFont("Segoe UI", fs, FontStyle.Bold);
+                    bool lastTry = fs <= 8.5F;
+                    string cityDraw = cityLine;
+                    if (!lastTry && g.MeasureString(cityDraw, fnt, int.MaxValue, fmt).Width > cityMax) continue;
+                    if (lastTry) cityDraw = TrimToFit(g, cityDraw, fnt, fmt, cityMax);
+                    g.DrawString(cityDraw, fnt, inkB,
+                        new RectangleF(weatherCol.X + 6, h - 46, cityMax, 24), fmt);
                     break;
                 }
             }
+            g.TextRenderingHint = hint0;
 
             // Refresh: 14px circle-arrow beside the city name; flashes on press.
             float rp = GetPressFlash(5);
@@ -4690,13 +4868,27 @@ namespace MyDynamicIsland
                 g.FillEllipse(hb, refresh.X - 3, refresh.Y - 3, refresh.Width + 6, refresh.Height + 6);
             }
             DrawRefreshGlyph(g, refresh,
-                rp > 0.01f ? Color.White : Color.FromArgb(170, 205, 210, 222));
-            DrawTextAt(g, string.IsNullOrWhiteSpace(weatherCondition) ? "" : weatherCondition,
-                8F, FontStyle.Regular, Color.FromArgb(150, 150, 158),
-                new Rectangle(weatherCol.X + 6, h - 24, weatherCol.Width - 12, 16), false);
+                rp > 0.01f ? Color.White
+                    : Color.FromArgb(wxInk.R, wxInk.G, wxInk.B));
+            if (!string.IsNullOrWhiteSpace(weatherCondition))
+            {
+                var hint1 = g.TextRenderingHint;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                using var condB = new SolidBrush(wxInk);
+                using var fmtC = new StringFormat(StringFormat.GenericTypographic);
+                fmtC.FormatFlags |= StringFormatFlags.NoWrap;
+                fmtC.LineAlignment = StringAlignment.Center;
+                string cond = TrimToFit(g, weatherCondition,
+                    CachedFont("Segoe UI", 9.5F, FontStyle.Regular), fmtC,
+                    weatherCol.Width - 12);
+                g.DrawString(cond, CachedFont("Segoe UI", 9.5F, FontStyle.Regular), condB,
+                    new RectangleF(weatherCol.X + 6, h - 24, weatherCol.Width - 12, 20), fmtC);
+                g.TextRenderingHint = hint1;
+            }
 
             // --- Clock column ---
-            DrawTextAt(g, DateTime.Now.ToString("HH:mm"), 22F, FontStyle.Bold, Color.White,
+            // 12-hour with the marker, identical to the collapsed pill
+            DrawTextAt(g, DateTime.Now.ToString("h:mm tt"), 20F, FontStyle.Bold, Color.White,
                 new Rectangle(clockCol.X, 30, clockCol.Width, 40), true);
             DrawTextAt(g, DateTime.Now.ToString("dddd, d MMM"), 9F, FontStyle.Regular,
                 Color.FromArgb(190, 190, 198),
@@ -4977,8 +5169,6 @@ namespace MyDynamicIsland
             var artRect = new Rectangle(left, top, artSize, artSize);
             int artRadius = (int)(artSize * 0.28); // rounder than a plain square, iOS-tile feel
 
-            // the aura sits behind everything — no text it can sit on top of
-
             if (albumArtBox.Image != null)
             {
                 using var clip = RoundedRegion(artRect, artRadius);
@@ -5247,38 +5437,97 @@ namespace MyDynamicIsland
         {
             int w = PillWidth, h = Height;
 
-            var iconBox = new Rectangle(14, (h - 44) / 2, 44, 44);
-            if (toastAppIcon != null)
+            var iconBox = new Rectangle(14, 14, 40, 40);
+            DrawToastAvatar(g, iconBox, toastAppIcon, transientTitle);
+
+            int textX = iconBox.Right + 12;
+            int textW = Math.Max(20, w - textX - 56);
+            DrawTextAt(g, FitOn(g, transientTitle, 10.5F, FontStyle.Bold, textW), 10.5F,
+                FontStyle.Bold, Color.White, new Rectangle(textX, 8, textW, 27), false);
+            DrawTextAt(g, NotificationWhen, 8F, FontStyle.Regular, Color.FromArgb(150, 150, 158),
+                new Rectangle(w - 54, 12, 42, 19), false, rightAlign: true);
+
+            var body = new Rectangle(textX, 36, textW, h - 52);
+            var bodyFont = CachedFont("Segoe UI", 9.6F, FontStyle.Regular);
+            TextRenderer.DrawText(g, transientDetail, bodyFont, body,
+                Color.FromArgb(213, 213, 220),
+                TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.WordBreak
+                | TextFormatFlags.PreserveGraphicsClipping | TextFormatFlags.EndEllipsis);
+        }
+
+        // Chosen flow, state 1: one centered quiet line — round identity, app,
+        // first fragment, time. Anywhere on it is a tap toward the full card.
+        private void DrawToastMini(Graphics g)
+        {
+            int w = PillWidth, h = Height;   // 283 x 48 at rest
+            var iconBox = new Rectangle(14, (h - 24) / 2, 24, 24);
+            DrawToastAvatar(g, iconBox, toastAppIcon, transientTitle);
+
+            int tx = iconBox.Right + 9;
+            int whenW = 34;
+            string name = FitOn(g, transientTitle, 8.6F, FontStyle.Bold,
+                Math.Max(50, (w - tx - whenW - 20) / 2));
+            DrawTextAt(g, name, 8.6F, FontStyle.Bold, Color.White,
+                new Rectangle(tx, (h - 22) / 2, w - tx - whenW - 12, 22), false);
+            int nameW = TextRenderer.MeasureText(g, name,
+                CachedFont("Segoe UI", 8.6F, FontStyle.Bold), new Size(int.MaxValue, 16),
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+
+            string preview = string.IsNullOrWhiteSpace(transientDetail)
+                || transientDetail.StartsWith(transientTitle, StringComparison.OrdinalIgnoreCase)
+                    ? "" : transientDetail;
+            if (preview.Length > 0)
             {
-                using (var clip = RoundedRegion(iconBox, 12))
+                int px = tx + nameW + 9;
+                int pw = Math.Max(20, w - px - whenW - 14);
+                DrawTextAt(g, FitOn(g, preview, 8.4F, FontStyle.Regular, pw), 8.4F,
+                    FontStyle.Regular, Color.FromArgb(199, 199, 207),
+                    new Rectangle(px, (h - 21) / 2, pw, 21), false);
+            }
+
+            DrawTextAt(g, NotificationWhen, 7.2F, FontStyle.Regular, Color.FromArgb(142, 142, 150),
+                new Rectangle(w - whenW - 12, (h - 17) / 2, whenW, 17), false, rightAlign: true);
+        }
+
+        // Circular identity for the toast family: real logo cropped to a disc,
+        // hashed tint + initial otherwise. One rule, any radius.
+        private void DrawToastAvatar(Graphics g, Rectangle box, Image? logo, string appName)
+        {
+            int round = box.Width / 2;
+            if (logo != null)
+            {
+                using (var clip = RoundedRegion(box, round))
                 {
                     Region? prev = g.Clip;
                     g.Clip = clip;
-                    g.DrawImage(toastAppIcon, iconBox);
+                    g.DrawImage(logo, box);
                     g.Clip = prev;
                 }
             }
             else
             {
-                using (var tile = new SolidBrush(TintForApp(transientTitle)))
-                using (var path = RoundedRectangle(iconBox, 12))
-                    g.FillPath(tile, path);
-                DrawTextAt(g, FirstLetter(transientTitle), 15F, FontStyle.Bold, Color.White, iconBox, true);
+                using var tile = new SolidBrush(TintForApp(appName));
+                using var path = RoundedRectangle(box, round);
+                g.FillPath(tile, path);
+                DrawTextAt(g, FirstLetter(appName), box.Height >= 36 ? 15F : 9F,
+                    FontStyle.Bold, Color.White, box, true);
             }
+        }
 
-            int textX = iconBox.Right + 12;
-            int textW = Math.Max(20, w - textX - 58);
-            DrawTextAt(g, transientTitle, 10.5F, FontStyle.Bold, Color.White,
-                new Rectangle(textX, 16, textW, 18), false);
-            DrawTextAt(g, NotificationWhen, 8F, FontStyle.Regular, Color.FromArgb(150, 150, 158),
-                new Rectangle(w - 56, 18, 44, 14), false, rightAlign: true);
-
-            var body = new Rectangle(textX, 36, textW, h - 46);
-            var bodyFont = CachedFont("Segoe UI", 9.2F, FontStyle.Regular);
-            TextRenderer.DrawText(g, transientDetail, bodyFont, body,
-                Color.FromArgb(226, 226, 232),
-                TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.WordBreak
-                | TextFormatFlags.PreserveGraphicsClipping | TextFormatFlags.EndEllipsis);
+        // Pixel-budget trim for the toast family: whole words preferred,
+        // ellipsis honest, never a hard clip.
+        private static string FitOn(Graphics g, string text, float size, FontStyle style, int maxPx)
+        {
+            if (maxPx <= 0 || text.Length == 0) return text;
+            var fnt = CachedFont("Segoe UI", size, style);
+            if (TextRenderer.MeasureText(g, text, fnt, new Size(int.MaxValue, 20),
+                    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width <= maxPx)
+                return text;
+            string cut = text;
+            while (cut.Length > 1 && TextRenderer.MeasureText(g, cut + "\u2026", fnt,
+                    new Size(int.MaxValue, 20), TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width > maxPx)
+                cut = cut[..^1];
+            return cut.TrimEnd() + "\u2026";
         }
 
         // The strip that closes each transient and reopens as the banner header.
@@ -5296,10 +5545,10 @@ namespace MyDynamicIsland
             // the source, and the words are the part you actually came to read.
             string line = string.IsNullOrWhiteSpace(transientDetail) ? transientTitle : transientDetail;
             DrawTextAt(g, line, 9.2F, FontStyle.Regular, Color.White,
-                new Rectangle(textLeft, (stripHeight - 18) / 2, textWidth, 18), false);
+                new Rectangle(textLeft, (stripHeight - 22) / 2, textWidth, 22), false);
 
             DrawTextAt(g, NotificationWhen, 7.8F, FontStyle.Regular, Color.FromArgb(150, 150, 158),
-                new Rectangle(PillWidth - whenWidth - 8, (stripHeight - 14) / 2, whenWidth, 14),
+                new Rectangle(PillWidth - whenWidth - 8, (stripHeight - 17) / 2, whenWidth, 17),
                 false, rightAlign: true);
         }
 
@@ -5453,18 +5702,18 @@ namespace MyDynamicIsland
             }
 
             float shown = Math.Clamp(isVolume
-                ? (muted ? 0f : volumeShownLevel)
+                ? volumeShownLevel
                 : Math.Max(0f, brightnessShownLevel), 0f, 1f);
 
-            // Icon sits vertically centred at the left lip of the tile.
-            const int iconSize = 24;
-            var iconRect = new Rectangle(14, (h - iconSize) / 2, iconSize, iconSize);
+            // — v4 anatomy, straight from the approved mock —
+            // glyph: 24px at the left lip, vertically centered
+            var iconRect = new Rectangle(12, (h - 24) / 2, 24, 24);
             using var brush = new SolidBrush(Color.White);
 
             if (isVolume)
             {
                 int waves = shown switch { >= 0.70f => 3, >= 0.34f => 2, > 0.02f => 1, _ => 0 };
-                DrawSpeakerIcon(g, brush,
+                DrawSpeakerIcon(g, muted ? SystemBrushes.ControlDark : brush,
                     iconRect.X + iconRect.Width / 2, iconRect.Y + iconRect.Height / 2,
                     muted, 1.05f, waves);
             }
@@ -5474,26 +5723,25 @@ namespace MyDynamicIsland
                     iconRect.X + iconRect.Width / 2, iconRect.Y + iconRect.Height / 2, 0.9f);
             }
 
-            int trackX = iconRect.Right + 12;
-            var trackRect = new Rectangle(trackX, (h - 7) / 2,
-                Math.Max(30, w - trackX - 16), 7);
+            // rail: 40% of the pill's width, 4px thick, seated at the right lip
+            int railW = Math.Max(60, (int)(w * 0.40f));
+            var trackRect = new Rectangle(w - 12 - railW, (h - 4) / 2, railW, 4);
 
-            using (var trackBrush = new SolidBrush(Color.FromArgb(72, 72, 78)))
-                FillRoundedRectangle(g, trackBrush, trackRect, 4);
+            using (var trackBrush = new SolidBrush(Color.FromArgb(35, 35, 38)))
+                FillRoundedRectangle(g, trackBrush, trackRect, 2);
 
             int fillW = (int)(trackRect.Width * shown);
+
+            // Volume keys change the *setting*; the mute flag just hides it.
+            // A muted pill ghosts the stored level in gray so you can see
+            // what unmutating will return to.
             if (fillW > 2)
             {
-                using var fillBrush = new SolidBrush(Color.White);
+                using var fillBrush = new SolidBrush(
+                    muted ? Color.FromArgb(58, 58, 62) : Color.White);
                 FillRoundedRectangle(g, fillBrush,
-                    new Rectangle(trackRect.X, trackRect.Y, fillW, trackRect.Height), 4);
+                    new Rectangle(trackRect.X, trackRect.Y, fillW, trackRect.Height), 2);
             }
-
-            const int knob = 14;
-            int knobX = Math.Max(trackRect.X, Math.Min(trackRect.X + fillW - knob / 2,
-                trackRect.Right - knob));
-            using (var knobBrush = new SolidBrush(Color.White))
-                g.FillEllipse(knobBrush, knobX, trackRect.Y + (trackRect.Height - knob) / 2, knob, knob);
         }
 
         // Launch greeting, rebuilt from the reference video frame by frame:

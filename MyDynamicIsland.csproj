@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
 	  <OutputType>WinExe</OutputType>
@@ -8,6 +8,7 @@
 	  <ImplicitUsings>enable</ImplicitUsings>
 	  <Nullable>enable</Nullable>
 	  <ApplicationManifest>app.manifest</ApplicationManifest>
+	  <Version>1.2.1</Version>
 	  <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 	  <SelfContained>true</SelfContained>
 	  <PublishSingleFile>true</PublishSingleFile>
@@ -17,6 +18,7 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
   </ItemGroup>
 
 </Project>

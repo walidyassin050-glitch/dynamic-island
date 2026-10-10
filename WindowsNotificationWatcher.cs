@@ -1,4 +1,6 @@
 using System;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -117,20 +119,61 @@ namespace MyDynamicIsland
 
         private static async Task<byte[]?> TryReadLogoAsync(UserNotification notification)
         {
+            // Source 1: the registered app logo (packaged apps ship a real one).
+            Windows.ApplicationModel.AppInfo? info = null;
+            try { info = notification.AppInfo; } catch { }
+            if (info != null)
+            {
+                try
+                {
+                    var logoRef = info.DisplayInfo?.GetLogo(new Windows.Foundation.Size(44, 44));
+                    if (logoRef != null)
+                    {
+                        using Windows.Storage.Streams.IRandomAccessStream stream = await logoRef.OpenReadAsync();
+                        if (stream.Size > 0 && stream.Size <= 3_000_000)
+                        {
+                            using var ms = new MemoryStream();
+                            stream.AsStream().CopyTo(ms);
+                            if (ms.Length > 64) return ms.ToArray();
+                        }
+                    }
+                }
+                catch { /* fall through to the exe probe */ }
+            }
+
+            // Source 2: classic desktop apps — their identity carries (or is)
+            // the exe path, so pull the real file icon off disk. Chrome's
+            // icon, Discord's icon, Notepad++'s — whatever the .exe wears.
+            string aumid = "";
+            try { aumid = info?.AppUserModelId ?? ""; } catch { }
+            return IconFromAddress(aumid);
+        }
+
+        static byte[]? IconFromAddress(string aumid)
+        {
             try
             {
-                // GetLogo(size), not a Logo property — same call shape the
-                // media-session icon reader already uses.
-                var logoRef = notification.AppInfo?.DisplayInfo?.GetLogo(new Windows.Foundation.Size(44, 44));
-                if (logoRef == null) return null;
-                using Windows.Storage.Streams.IRandomAccessStream stream = await logoRef.OpenReadAsync();
-                if (stream.Size == 0 || stream.Size > 3_000_000) return null;
+                if (aumid.Length == 0) return null;
+                string? exe = null;
+                if (aumid.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(aumid))
+                    exe = aumid;
+                else
+                {
+                    // "Company.App!C:\folder\thing.exe" — the path hides after the bang.
+                    int bang = aumid.LastIndexOf('!');
+                    string tail = bang >= 0 ? aumid[(bang + 1)..] : aumid;
+                    if (tail.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(tail))
+                        exe = tail;
+                }
+                if (exe == null) return null;
+                using var ico = Icon.ExtractAssociatedIcon(exe);
+                if (ico == null) return null;
+                using var bmp = ico.ToBitmap();
                 using var ms = new MemoryStream();
-                stream.AsStream().CopyTo(ms);
-                ms.Position = 0;
-                return ms.ToArray();
+                bmp.Save(ms, ImageFormat.Png);
+                return ms.Length > 64 ? ms.ToArray() : null;
             }
-            catch { return null; }   // plenty of apps ship no logo; glyph tile covers
+            catch { return null; }
         }
 
         private static string ExtractText(UserNotification notification, string bindingTemplate)

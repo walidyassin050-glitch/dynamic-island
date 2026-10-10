@@ -73,7 +73,7 @@ namespace MyDynamicIsland
     }
 
     // Tiny global transfer registry: exactly one at a time (the island shows
-    // one card anyway). Changed fires from worker threads — UI parts marshal.
+    // one card anyway). Changed fires from worker threads - UI parts marshal.
     internal static class IslandDownloads
     {
         public static IslandDownload? Current { get; private set; }
@@ -100,7 +100,7 @@ namespace MyDynamicIsland
         static System.Threading.Timer? demoTimer;
 
         // Self-explanatory demo of the page with a simulated 96 MB transfer
-        // (no network, no disk) — wired to a link in Settings.
+        // (no network, no disk) - wired to a link in Settings.
         public static void StartDemo()
         {
             StopDemo();
@@ -208,10 +208,11 @@ namespace MyDynamicIsland
 
     public partial class Form1
     {
-        private readonly Size downloadSize = new(418, 151);
+        private readonly Size downloadSize = new(478, 172);   // E lives at the music card's size
         private Rectangle dlPauseRect, dlCancelRect;
-        private bool dlExternal;   // watched, not owned — no Pause/Cancel claims
-        private string downloadDismissedPhase = "";
+        private bool dlExternal;   // watched, not owned - no Pause/Cancel claims
+        private IslandDownload? dlAnnounced;   // popups fire once per phase,
+        private string dlAnnouncedPhase = "";  // never a second time for the same one
         private bool downloadWired;
 
         private bool DownloadHudActive =>
@@ -232,36 +233,60 @@ namespace MyDynamicIsland
             var d = IslandDownloads.Current;
             if (d == null) return;
 
-            // The card keeps itself up while the transfer lives; a manual
-            // dismissal is respected FOR THAT PHASE — progress pings of the
-            // same running transfer never re-pop it, but pausing, resuming,
-            // finishing or a brand-new download each show themselves once.
-            bool dismissed = downloadDismissedPhase == d.Phase;
-            if (d.Active && !dismissed)
+            // One popup per phase, exactly like every other island activity:
+            // it expands, shows the state, and collapses on its own after a
+            // beat - running transfers stay reachable as the temporary 4th
+            // page (wheel or dots) for as long as they live.
+            bool unseen = !ReferenceEquals(dlAnnounced, d) || dlAnnouncedPhase != d.Phase;
+            if (unseen)
             {
+                dlAnnounced = d;
+                dlAnnouncedPhase = d.Phase;
                 transientKind = TransientKind.Download;
                 transientTitle = d.Title;
                 transientDetail = "";
                 holding = true;
-                holdUntil = DateTime.Now.AddMinutes(30);
+                holdUntil = DateTime.Now.AddMilliseconds(d.Active ? 3600 : 2800);
                 collapseAt = null;
             }
-            else if (!d.Active && !dismissed)
+
+            // The page evaporates with the transfer - if it was the page on
+            // screen, land back on music.
+            bool pageGone = !d.Active && pageIndex >= PageCount();
+            if (pageGone)
             {
-                // finishing beat: show the result briefly, then it's gone
-                transientKind = TransientKind.Download;
-                transientTitle = d.Title;
-                holding = true;
-                holdUntil = DateTime.Now.AddSeconds(3.4);
+                pageIndex = 0;
+                activeMode = PageAt(0);
+                modeSwitchAt = DateTime.Now;
             }
-            else if (!d.Active && dismissed && DownloadHudActive) { holding = false; }
-            RefreshVisual();
+            // Progress pings while no download UI is on screen must not drag
+            // the whole island into extra repaints (“laggy” report): repaint
+            // only when the popup is up or the progress page is what the user
+            // is looking at (or a page just vanished with them on it).
+            bool visible = unseen || pageGone || DownloadHudActive ||
+                (CardShowing && activeMode == IslandMode.Download);
+            if (visible) RefreshVisual();
         }
+
+        // Style E - the iOS Dynamic Island download activity, at the music
+        // card's exact footprint (478x172, 28px corners). Blue ring hugging a
+        // squircle file tile, gray label rows, one Cancel pill + pause circle.
+        private static readonly Color IosBlue = Color.FromArgb(10, 132, 255);
+        private static readonly Color IosSurface = Color.FromArgb(44, 44, 46);
+        private static readonly Color IosLabel = Color.FromArgb(142, 142, 147);
+        private static readonly Color IosName = Color.FromArgb(242, 242, 247);
 
         private void GetDownloadButtonRects(int w, int h)
         {
-            dlPauseRect = new Rectangle(w - 14 - 78 - 10 - 84, h - 44, 84, 30);
-            dlCancelRect = new Rectangle(w - 14 - 78, h - 44, 78, 30);
+            int y = h - 50;
+            bool hideOnly = dlExternal || !(IslandDownloads.Current?.Active ?? false);
+            if (hideOnly)
+                dlCancelRect = new Rectangle(18, y, w - 36, 36);
+            else
+            {
+                dlCancelRect = new Rectangle(18, y, w - 18 - 36 - 10 - 18, 36);
+                dlPauseRect = new Rectangle(w - 18 - 36, y, 36, 36);
+            }
         }
 
         private void DrawDownloadCard(Graphics g)
@@ -269,74 +294,117 @@ namespace MyDynamicIsland
             var d = IslandDownloads.Current;
             if (d == null) return;
             int w = PillWidth, h = Height;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-            // ring geometry: 64 diameter, 7 stroke, 15pt percent — the lab values
-            const float ring = 32f, stroke = 7f;
-            float ccx = 16 + ring + 8, ccy = h / 2f - 12;
+            // ring + tile cluster
+            float cxr = 51.5f, cyr = h / 2f - 18f, ring = 27f;
+            using (var track = new Pen(Color.FromArgb(58, 58, 60), 5f))
+                g.DrawEllipse(track, cxr - ring, cyr - ring, ring * 2, ring * 2);
 
-            using (var track = new Pen(Color.FromArgb(40, 255, 255, 255), stroke))
+            float pct = d.Finished ? 1f : d.Pct;
+            if (d.Finished || (d.Total > 0 && pct > 0.004f))
             {
-                track.StartCap = LineCap.Round; track.EndCap = LineCap.Round;
-                g.DrawEllipse(track, ccx - ring, ccy - ring, ring * 2, ring * 2);
+                using var arcP = new Pen(IosBlue, 5f)
+                { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                if (pct >= 0.999f) g.DrawEllipse(arcP, cxr - ring, cyr - ring, ring * 2, ring * 2);
+                else g.DrawArc(arcP, cxr - ring, cyr - ring, ring * 2, ring * 2, -90f, pct * 360f);
+            }
+            else if (d.Active)
+            {
+                // total not settled yet: calm full circle, never a spinner
+                using var dim = new Pen(Color.FromArgb(90, 10, 132, 255), 5f);
+                g.DrawEllipse(dim, cxr - ring, cyr - ring, ring * 2, ring * 2);
             }
 
-            bool timed = d.Total > 0;   // browsers hide the total — then the ring just spins
-            float pct = d.Finished ? 1f : (timed ? d.Pct : 0f);
-            var boxR = new Rectangle((int)(ccx - ring), (int)(ccy - ring), (int)(ring * 2), (int)(ring * 2));
-            if (!d.Cancelled)
-            {
-                using var grad = new LinearGradientBrush(boxR,
-                    Color.FromArgb(127, 212, 255), Color.FromArgb(180, 140, 255), 45f);
-                using var arc = new Pen(grad, stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-                if (d.Finished || (timed && pct >= 0.999f))
-                    g.DrawEllipse(arc, boxR.X, boxR.Y, boxR.Width, boxR.Height);
-                else if (timed && pct > 0)
-                    g.DrawArc(arc, boxR.X, boxR.Y, boxR.Width, boxR.Height, -90f, pct * 360f);
-                else if (!timed && d.Active)
-                    g.DrawArc(arc, boxR.X, boxR.Y, boxR.Width, boxR.Height,
-                        (float)(Environment.TickCount64 % 1400) / 1400f * 360f, 130f);
-            }
+            var tile = new Rectangle((int)(cxr - 20), (int)(cyr - 20), 40, 40);
+            using (var tp = RoundedRectangle(tile, 11))
+            using (var tb = new SolidBrush(Color.FromArgb(35, 35, 38)))
+                g.FillPath(tb, tp);
+            if (d.Finished)
+                DrawTextAt(g, "\u2713", 13F, FontStyle.Bold, IosBlue, tile, true);
+            else if (d.Cancelled)
+                DrawTextAt(g, "\u2715", 12F, FontStyle.Regular, IosLabel, tile, true);
+            else
+                using (var pen = new Pen(IosName, 2.2f)
+                    { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                {
+                    float gx = tile.X + 20, gy = tile.Y + 20;
+                    g.DrawLine(pen, gx, gy - 9, gx, gy + 2);
+                    g.DrawLines(pen, new[]
+                    {
+                        new PointF(gx - 4.5f, gy - 2.5f), new PointF(gx, gy + 3f),
+                        new PointF(gx + 4.5f, gy - 2.5f),
+                    });
+                    g.DrawLine(pen, gx - 8, gy + 8, gx + 8, gy + 8);
+                }
 
-            string bigText = d.Finished ? "✓" : d.Cancelled ? "✕"
-                : timed ? $"{(int)(pct * 100)}%" : d.Human(d.Done);
-            DrawTextAt(g, bigText, (timed || d.Finished || d.Cancelled) ? 15F : 8.2F,
-                FontStyle.Bold, Color.White,
-                new Rectangle((int)(ccx - ring), (int)(ccy - 11), (int)(ring * 2), 22), true);
+            // text column
+            int tx = 96, maxw = Math.Max(80, w - tx - 96);
+            DrawTextAt(g, Fit(g, d.Title, 11F, FontStyle.Bold, maxw),
+                11F, FontStyle.Bold, IosName,
+                new Rectangle(tx, h / 2 - 55, maxw, 20), false);
+            DrawTextAt(g, Fit(g, BuildMeta(d), 8.4F, FontStyle.Regular, maxw),
+                8.4F, FontStyle.Regular, IosLabel,
+                new Rectangle(tx, h / 2 - 33, maxw, 15), false);
 
-            // text block right of the ring. Fit() guarantees one clean line:
-            // an old-school name like "Unconfirmed 4a7.crdownload" just ends
-            // in a real ellipsis, it can never overflow or hard-clip.
-            int tx = (int)(ccx + ring) + 26;
-            int tw = Math.Max(80, w - tx - 18);
-            string dlTitle = Fit(g, d.Title, 12.5F, FontStyle.Bold, tw);
-            string dlStatus = Fit(g, d.StatusLine, 10F, FontStyle.Regular, tw);
-            DrawTextAt(g, dlTitle, 12.5F, FontStyle.Bold, Color.FromArgb(238, 240, 246),
-                new Rectangle(tx, h / 2 - 44, tw, 20), false);
-            DrawTextAt(g, dlStatus, 10F, FontStyle.Regular, Color.FromArgb(154, 160, 176),
-                new Rectangle(tx, h / 2 - 22, tw, 16), false);
+            // right-side readout: one run of text, box pulled clear of the
+            // corner radius and the dot band (the clipped '10%' report)
+            var readout = new Rectangle(w - 178, h / 2 - 58, 152, 30);
+            if (d.Finished)
+                DrawTextAt(g, "Done", 15F, FontStyle.Bold, IosBlue, readout, false, true);
+            else if (d.Cancelled)
+                DrawTextAt(g, "\u2715", 15F, FontStyle.Regular, IosLabel, readout, false, true);
+            else
+                DrawTextAt(g, d.Total > 0 ? $"{(int)(pct * 100)}%" : d.Human(d.Done),
+                    d.Total > 0 ? 16.5F : 13F, FontStyle.Bold, IosName, readout, false, true);
 
-            // belt-and-braces linear bar under the detail row (browser style)
-            int barW = Math.Min(tw, 300);
-            using (var bt = new SolidBrush(Color.FromArgb(28, 255, 255, 255)))
-                g.FillRectangle(bt, tx, h / 2f + 2, barW, 5);
-            using (var bf = new SolidBrush(Color.FromArgb(127, 210, 255)))
-                g.FillRectangle(bf, tx, h / 2f + 2, barW * pct, 5);
-
-            // A browser's own download is only observed here — the card
-            // says Hide, never Pause/Cancel, so it can't lie about control.
+            // controls
             dlExternal = d.WatchPath.Length > 0;
             GetDownloadButtonRects(w, h);
-            if (dlExternal)
+            bool live = d.Active && !dlExternal;
+            using (var pb = new SolidBrush(IosSurface))
+                using (var p = RoundedRectangle(dlCancelRect, 18))
+                    g.FillPath(pb, p);
+            DrawTextAt(g, dlExternal ? "Hide"
+                : d.Active ? "Cancel" : "Dismiss",
+                10.5F, FontStyle.Regular, IosName, dlCancelRect, true);
+            if (live || (dlPauseRect.Width == 36 && d.Active && dlExternal == false))
             {
-                DrawDownloadButton(g, dlCancelRect, "Hide", true);
-                return;
+                using var cb = new SolidBrush(IosSurface);
+                g.FillEllipse(cb, dlPauseRect);
+                using var bars = new SolidBrush(IosName);
+                float bx = dlPauseRect.X + 18, by = dlPauseRect.Y + 18;
+                if (d.Paused)
+                    using (var tri = new SolidBrush(IosName))
+                        g.FillPolygon(tri, new[]
+                        {
+                            new PointF(bx - 4, by - 6), new PointF(bx - 4, by + 6),
+                            new PointF(bx + 6, by),
+                        });
+                else
+                {
+                    g.FillRectangle(bars, bx - 5.5f, by - 6, 3.4f, 12);
+                    g.FillRectangle(bars, bx + 1.5f, by - 6, 3.4f, 12);
+                }
             }
+        }
 
-            // Pause / Cancel — Pause dims out once the transfer is over
-            bool live = d.Active;
-            DrawDownloadButton(g, dlPauseRect, live
-                ? (d.Paused ? "Resume" : "Pause") : "Close", live);
-            DrawDownloadButton(g, dlCancelRect, live ? "Cancel" : "Hide", live);
+        private static string BuildMeta(IslandDownload d)
+        {
+            if (d.Finished) return "Saved to your Downloads folder.";
+            if (d.Cancelled) return "Cancelled.";
+            var parts = new List<string>();
+            if (d.Paused) parts.Add("Paused");
+            double bps = d.BytesPerSec;
+            if (bps > 1024) parts.Add($"{bps / 1024 / 1024:0.#} MB/s");
+            else parts.Add($"{bps / 1024:0} KB/s");
+            if (d.Total > 0 && !d.Paused)
+            {
+                double rem = (d.Total - d.Done) / Math.Max(1024, bps);
+                parts.Add(rem < 90 ? $"{Math.Max(1, (int)rem)} sec left" : $"{rem / 60:0.#} min left");
+            }
+            parts.Add(d.Total > 0 ? d.Human(d.Total) : $"{d.Human(d.Done)} so far");
+            return string.Join("  \u00b7  ", parts);
         }
 
         // Measure-and-trim: the card text always fits the column it owns.
@@ -364,53 +432,56 @@ namespace MyDynamicIsland
                 r, true);
         }
 
-        // Resting-pill chip: a mini progress ring just left of the waveform,
-        // visible without expanding anything while a transfer is live.
-        private void DrawDownloadChip(Graphics g)
-        {
-            var d = IslandDownloads.Running;
-            if (d == null || clicked || holding) return;
-            float r = 8.5f;
-            float x = PillWidth - 86, y = Height / 2f;
-            using (var t = new Pen(Color.FromArgb(45, 255, 255, 255), 2.4f))
-                g.DrawEllipse(t, x - r, y - r, r * 2, r * 2);
-            using (var p = new Pen(Color.FromArgb(127, 212, 255), 2.4f)
-            { StartCap = LineCap.Round, EndCap = LineCap.Round })
-            {
-                if (d.Total > 0)
-                    g.DrawArc(p, x - r, y - r, r * 2, r * 2, -90f, d.Pct * 360f);
-                else
-                    g.DrawArc(p, x - r, y - r, r * 2, r * 2,
-                        (float)(DateTime.Now.Second % 2 * 180), 140);
-            }
-        }
-
         private bool DownloadCardClick(Point p)
         {
             var d = IslandDownloads.Current;
             if (d == null) { holding = false; return true; }
-            if (dlExternal)
-            {
-                downloadDismissedPhase = d.Phase;   // watcher keeps this phase while
-                holding = false;                    // it runs — match means stay hidden
-                return true;
-            }
-            if (d.Active && dlPauseRect.Contains(p))
+            if (!dlExternal && d.Active && dlPauseRect.Contains(p))
             {
                 d.Paused = !d.Paused;
                 IslandDownloads.Raise();
                 return true;
             }
-            if (d.Active && dlCancelRect.Contains(p))
+            if (!dlExternal && d.Active && dlCancelRect.Contains(p))
             {
                 d.Cancel();
                 holding = false;
                 return true;
             }
-            // anywhere else: dismiss for now (transfer keeps running)
-            downloadDismissedPhase = d.Phase;
             holding = false;
             return true;
+        }
+
+        // The 4th page is open like any other page: taps do nothing except
+        // the two controls (own transfers) - everything else belongs to the
+        // normal card click path (page flips, collapse).
+        private bool DownloadPageClick(Point p)
+        {
+            var d = IslandDownloads.Current;
+            if (d == null) { SetPage(0); return true; }
+            if (!d.Active) return false;
+            DrawDownloadCardProbe(d);   // ensures rects/external flag are current
+            if (dlExternal) return false;
+            if (dlPauseRect.Contains(p))
+            {
+                d.Paused = !d.Paused;
+                IslandDownloads.Raise();
+                return true;
+            }
+            if (dlCancelRect.Contains(p))
+            {
+                d.Cancel();
+                return true;
+            }
+            return false;
+        }
+
+        // Button rects come out of the last paint; refresh them for hit tests
+        // that race the animation.
+        private void DrawDownloadCardProbe(IslandDownload d)
+        {
+            dlExternal = d.WatchPath.Length > 0;
+            GetDownloadButtonRects(PillWidth, Height);
         }
     }
 
