@@ -72,9 +72,9 @@ namespace MyDynamicIsland
         // Rest and hover share one width. PeekTopRowHeight preserves the compact
         // media row while hover grows downward to reveal the title.
         private const int PeekTopRowHeight = 32;
-        private readonly Size restingSize = new(260, 50);
-        private readonly Size peekSize = new(260, 72);
-        private readonly Size fullSize = new(430, 184);
+        private readonly Size restingSize = new(283, 46);
+        private readonly Size peekSize = new(283, 72);
+        private readonly Size fullSize = new(478, 172);
         private Size targetSize;
         private Size sizeAnimationStart;
         private DateTime sizeAnimationStartedAt = DateTime.MinValue;
@@ -90,7 +90,7 @@ namespace MyDynamicIsland
 
         private DateTime holdUntil = DateTime.MinValue;
         private bool holding = false;
-        private enum TransientKind { Volume, Notification, Network, Battery, Device, Brightness, DeviceAudio }
+        private enum TransientKind { Volume, Notification, Network, Battery, Device, Brightness, DeviceAudio, Download }
         private TransientKind transientKind = TransientKind.Volume;
         private string transientTitle = "";
         private string transientDetail = "";
@@ -159,7 +159,7 @@ namespace MyDynamicIsland
         // NOTE: values mirror fullSize below - C# forbids field initializers
         // referencing other instance fields, so if you ever resize the card,
         // resize this to match.
-        private readonly Size welcomeSize = new Size(430, 184);
+        private readonly Size welcomeSize = new Size(478, 172);
 
         private bool hovering = false;
         private bool clicked = false;
@@ -361,9 +361,11 @@ namespace MyDynamicIsland
         // Every text popup, not just Windows toasts: network, battery and
         // device events are the same object wearing different glyphs, and a
         // two-line battery message deserves the same room to open into.
+        // toasts run their own card now; the strip/banner system stays for
+        // the plain activity popups (network, power, devices)
         private bool NotificationShowing =>
-            holding && transientKind is TransientKind.Notification or
-                TransientKind.Network or TransientKind.Battery or TransientKind.Device;
+            holding && transientKind is TransientKind.Network
+                or TransientKind.Battery or TransientKind.Device;
 
         private string NotificationWhen
         {
@@ -707,6 +709,11 @@ namespace MyDynamicIsland
 
         private System.Windows.Forms.Timer batteryTimer = new();
         private readonly WindowsNotificationWatcher notificationWatcher = new();
+
+        // iOS-style toast card: real sender icon + title + wrapped text on an
+        // ask-card-sized pill. toastAppIcon is 44x44, owned by the island.
+        private Bitmap? toastAppIcon;
+        private bool ToastHud => holding && transientKind == TransientKind.Notification;
         private DateTime lastDeviceChangeAt = DateTime.MinValue;
         private IntPtr brightnessNotificationHandle = IntPtr.Zero;
         private float batteryPercent = 1f;   // 0..1
@@ -911,6 +918,8 @@ namespace MyDynamicIsland
             Size = GetTotalSize(restingSize);
             targetSize = restingSize;
             sizeAnimationStart = restingSize;
+            WireDownloads();
+            BrowserDownloads.Start();
 
             StartPosition = FormStartPosition.Manual;
             anchorScreen = Screen.FromPoint(Cursor.Position);
@@ -1868,14 +1877,35 @@ namespace MyDynamicIsland
             if (InvokeRequired) BeginInvoke((Action)Apply); else Apply();
         }
 
-        private void NotificationReceived(string appName, string message)
+        private void NotificationReceived(string appName, string message, byte[]? logoPng)
         {
             if (!appSettings.WindowsNotifications) return;
-            void Apply() => ShowSystemActivity(
-                string.IsNullOrWhiteSpace(appName) ? "Notification" : appName,
-                message,
-                TransientKind.Notification,
-                4200);
+
+            // icon swap happens on the UI thread with the popup itself;
+            // the previous sender's bitmap dies the moment a new one lands
+            Bitmap? nextIcon = null;
+            if (logoPng != null && logoPng.Length > 64)
+            {
+                try
+                {
+                    using var ms = new MemoryStream(logoPng);
+                    using var raw = Image.FromStream(ms);
+                    nextIcon = new Bitmap(raw, new Size(44, 44));
+                }
+                catch { nextIcon = null; }
+            }
+
+            void Apply()
+            {
+                var old = toastAppIcon;
+                toastAppIcon = nextIcon;
+                old?.Dispose();
+                ShowSystemActivity(
+                    string.IsNullOrWhiteSpace(appName) ? "Notification" : appName,
+                    message,
+                    TransientKind.Notification,
+                    5200);
+            }
 
             if (IsDisposed) return;
             if (InvokeRequired) BeginInvoke((Action)Apply); else Apply();
@@ -2020,8 +2050,11 @@ namespace MyDynamicIsland
                 "Windows access: denied ("
                     + (string.IsNullOrWhiteSpace(notificationAccessDetail) ? "user consent declined" : notificationAccessDetail) + ")",
             WindowsNotificationWatcher.AccessState.Failed =>
-                "Windows access failed: "
-                    + (string.IsNullOrWhiteSpace(notificationAccessDetail) ? "no detail captured" : notificationAccessDetail),
+                // The honest portable-exe sentence: Windows grants the
+                // notification listener only to installed (packaged) apps, so
+                // this is not a malfunction to fix but a door by design.
+                "unavailable in the portable build — Windows gives live-notification "
+                + "access only to installed apps; every other feature works",
             _ => "Windows access: not checked yet",
         };
 
@@ -2305,6 +2338,12 @@ namespace MyDynamicIsland
 
             if (holding)
             {
+                if (transientKind == TransientKind.Download)
+                    return downloadSize;
+
+                if (transientKind == TransientKind.Notification)
+                    return askSize;   // the iOS card speaks ask-page dimensions
+
                 if (transientKind == TransientKind.Volume || transientKind == TransientKind.Brightness)
                     // One shared slider-tile silhouette for volume & brightness.
                     // Once a 356x84 slab — now close to the footprint of the
@@ -2452,6 +2491,20 @@ namespace MyDynamicIsland
                 return;
             }
 
+            if (DownloadHudActive)
+            {
+                DownloadCardClick(e.Location);
+                RefreshVisual();
+                return;
+            }
+
+            if (ToastHud)
+            {
+                holding = false;
+                RefreshVisual();
+                return;
+            }
+
             if (holding && (transientKind == TransientKind.Volume ||
                             transientKind == TransientKind.Brightness))
             {
@@ -2507,6 +2560,17 @@ namespace MyDynamicIsland
             if (overlay != OverlayKind.None)
             {
                 DismissOverlay();
+            }
+            else if (DownloadHudActive)
+            {
+                downloadDismissedPhase = IslandDownloads.Current?.Phase ?? "";
+                holding = false;
+                RefreshVisual();
+            }
+            else if (ToastHud)
+            {
+                holding = false;
+                RefreshVisual();
             }
             else if (NotificationShowing && notificationExpanded)
             {
@@ -2765,6 +2829,7 @@ namespace MyDynamicIsland
             mediaWatcher.Stop();
             spotifyQueue.Dispose();
             lyrics.Clear();   // drops this track's lines; the shared HttpClient stays
+            toastAppIcon?.Dispose();
 
             foreach (var item in queueItems)
                 item.Art?.Dispose();
@@ -3075,7 +3140,7 @@ namespace MyDynamicIsland
         // left-edge artwork, padded generously.
         private Rectangle GetCollapsedArtHitRect()
         {
-            const int iconSize = 24;
+            const int iconSize = 28;
             int rowH = Height > restingSize.Height ? restingSize.Height : Height;
             var rect = new Rectangle(14, (rowH - iconSize) / 2, iconSize, iconSize);
             rect.Inflate(8, 8);
@@ -3863,10 +3928,11 @@ namespace MyDynamicIsland
             // pill's 15px radius and its flatter shoulder curve, so a 146px-tall
             // body rendered as a boxy slab with the bottom row clipped. The
             // compact strip stays on the pill radius, because it IS the pill.
-            int cornerRadius = clicked || overlay != OverlayKind.None || ShowWelcome ||
-                (NotificationShowing && notificationExpanded)
-                ? Math.Min(28, Height / 2)
-                : Math.Min(15, Height / 2);
+            int cornerRadius = DownloadHudActive ? 21
+                : clicked || overlay != OverlayKind.None || ShowWelcome ||
+                  (NotificationShowing && notificationExpanded)
+                    ? Math.Min(28, Height / 2)
+                    : Math.Min(12, Height / 2);
             using (var pillPath = AttachedNotchPath(bounds, cornerRadius))
                 FillLiquidGlass(g, pillPath, bounds);
 
@@ -3903,6 +3969,10 @@ namespace MyDynamicIsland
                     DrawVolumePopup(g);
                 else if (transientKind == TransientKind.Brightness)
                     DrawSliderHud(g, false);
+                else if (transientKind == TransientKind.Notification)
+                    DrawToastCard(g);
+                else if (transientKind == TransientKind.Download)
+                    DrawDownloadCard(g);
                 else
                     DrawSystemActivityPopup(g);
                 return;
@@ -4100,7 +4170,7 @@ namespace MyDynamicIsland
             float top = inset;
             float left = inset;
             float right = PillWidth - inset - 1f;
-            float radius = Math.Min(15f, (Height - inset * 2f) / 2f);
+            float radius = Math.Min(12f, (Height - inset * 2f) / 2f);
             const int arcSamples = 16;
             var pts = new List<PointF>(arcSamples * 2 + 5)
             {
@@ -4155,7 +4225,7 @@ namespace MyDynamicIsland
 
             var strip2 = strip.ToArray();
 
-            using (var progressPen = new Pen(color, 2.2f)
+            using (var progressPen = new Pen(color, 2.4f)
             {
                 LineJoin = LineJoin.Round,
                 StartCap = LineCap.Round,
@@ -4169,7 +4239,7 @@ namespace MyDynamicIsland
 
         private void DrawCollapsedMediaRow(Graphics g, int rowHeight)
         {
-            const int iconSize = 24;
+            const int iconSize = 28;
             const int left = 14;
             var iconRect = new Rectangle(left, (rowHeight - iconSize) / 2, iconSize, iconSize);
 
@@ -4215,7 +4285,7 @@ namespace MyDynamicIsland
             // from visually running into the dot sitting just past the pill.
             int peekHardStop = PillWidth - sidePadding;
 
-            DrawScrollingText(g, song, 9.4F, FontStyle.Bold,
+            DrawScrollingText(g, song, 9.8F, FontStyle.Bold,
                 Color.White, textRow, ref peekMarqueeOffset, peekHardStop);
         }
 
@@ -4227,6 +4297,7 @@ namespace MyDynamicIsland
             if (!hasTrack)
             {
                 DrawCollapsedMediaRow(g, Height);
+                DrawDownloadChip(g);
                 return;
             }
 
@@ -4240,6 +4311,7 @@ namespace MyDynamicIsland
                     GetCurrentPosition().TotalSeconds / trackDuration.TotalSeconds, 0d, 1d);
                 DrawProgressOutline(g, progress, albumAccentColor);
             }
+            DrawDownloadChip(g);
         }
 
         // --- Page indicator ---
@@ -4348,25 +4420,10 @@ namespace MyDynamicIsland
             return new Rectangle(12 + cw, h - 42, 14, 14);
         }
 
-        // Circular-arrow refresh glyph, scaled down for its 14px slot.
-        private static void DrawRefreshGlyph(Graphics g, Rectangle area, Color color)
-        {
-            using var pen = new Pen(color, 1.35f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-            var r = Rectangle.Inflate(area, 2, 2);
-            g.DrawArc(pen, r, -55, 265);
-            double a = -55 * Math.PI / 180.0;
-            float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f;
-            float rx = r.Width / 2f, ry = r.Height / 2f;
-            var tip = new PointF(cx + (float)Math.Cos(a) * rx, cy + (float)Math.Sin(a) * ry);
-            g.DrawLine(pen, tip, new PointF(tip.X - 3.4f, tip.Y - 1.2f));
-            g.DrawLine(pen, tip, new PointF(tip.X + .8f, tip.Y - 3.9f));
-        }
-
-        // The sky block, painted into its own small bitmap then composited
-        // onto the card at 80% strength and clipped to the notch path.
-        // Offscreen compositing matters twice: it removes the visible
-        // banding a direct low-alpha gradient over black produces, and the
-        // silhouette clip makes every layer curve inside the rounded corner.
+        // The sky block, painted offscreen at 80% strength and clipped to the
+        // notch silhouette — vertical day/night gradient, low sun bloom by
+        // day, twinkling star scatter by night, all dissolving rightward
+        // into the card's black long before the clock column.
         private void DrawSkyWash(Graphics g, int w, int h, int colWidth)
         {
             int skyW = Math.Min(Math.Max(2, w), (int)(colWidth * 2.1f));
@@ -4379,7 +4436,8 @@ namespace MyDynamicIsland
                 bg.Clear(Color.Transparent);
 
                 SkyTones(out Color top, out Color horizon);
-                using (var v = new LinearGradientBrush(new Rectangle(0, 0, skyW, skyH), top, horizon, 90f))
+                var vRect = new Rectangle(0, 0, skyW, skyH);
+                using (var v = new LinearGradientBrush(vRect, top, horizon, 90f, true))
                 {
                     var cb = new System.Drawing.Drawing2D.ColorBlend
                     {
@@ -4387,12 +4445,11 @@ namespace MyDynamicIsland
                         Positions = new[] { 0f, .38f, .7f, 1f },
                     };
                     v.InterpolationColors = cb;
-                    bg.FillRectangle(v, 0, 0, skyW, skyH);
+                    bg.FillRectangle(v, vRect);
                 }
 
                 if (weatherIsDay)
                 {
-                    // low sun bloom, brightening the upper sky
                     var sunRect = new Rectangle(-54, -40, 190, 150);
                     using var sp = new GraphicsPath();
                     sp.AddEllipse(sunRect);
@@ -4406,9 +4463,6 @@ namespace MyDynamicIsland
                 }
                 else
                 {
-                    // stars: fixed golden-angle scatter, a slow shared clock
-                    // for the twinkle, kept in the upper 55% above the
-                    // (invisible) horizon haze
                     double t = DateTime.Now.TimeOfDay.TotalSeconds;
                     for (int i = 0; i < 26; i++)
                     {
@@ -4424,13 +4478,13 @@ namespace MyDynamicIsland
                     }
                 }
 
-                // breathe out rightward: black creeps IN as x grows, so the
-                // sky dissolves past the weather block instead of ending at
-                // a line — this replaces the old hard column boundary
+                // breathe out rightward: black creeps in as x grows, so the
+                // sky dissolves past the weather block instead of ending at it
                 int fadeX = (int)(colWidth * .5f);
                 int fadeW = Math.Max(2, skyW - fadeX);
-                using (var hf = new LinearGradientBrush(new Rectangle(fadeX, 0, fadeW, skyH),
-                    Color.FromArgb(0, 0, 0, 0), Color.FromArgb(255, 0, 0, 0), 0f))
+                var hRect = new Rectangle(fadeX, 0, fadeW, skyH);
+                using (var hf = new LinearGradientBrush(hRect,
+                    Color.FromArgb(0, 0, 0, 0), Color.FromArgb(255, 0, 0, 0), 0f, true))
                 {
                     var cb = new System.Drawing.Drawing2D.ColorBlend
                     {
@@ -4442,7 +4496,7 @@ namespace MyDynamicIsland
                         Positions = new[] { 0f, .4f, .78f, 1f },
                     };
                     hf.InterpolationColors = cb;
-                    bg.FillRectangle(hf, fadeX, 0, fadeW, skyH);
+                    bg.FillRectangle(hf, hRect);
                 }
             }
 
@@ -4464,8 +4518,6 @@ namespace MyDynamicIsland
         private static Color SkyMix(Color a, Color b, float t) => Color.FromArgb(
             (int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
 
-        // Sky top/horizon tones by condition; night is the same hues pulled
-        // deep and blue, not blacked out — so a clear night still reads sky.
         private void SkyTones(out Color top, out Color horizon)
         {
             (Color, Color) d = weatherIconKind switch
@@ -4479,14 +4531,8 @@ namespace MyDynamicIsland
                 "storm"  => (Color.FromArgb(44, 40, 72), Color.FromArgb(92, 84, 122)),
                 _        => (Color.FromArgb(84, 140, 208), Color.FromArgb(178, 216, 246)),
             };
-            if (weatherIsDay)
-            {
-                top = d.Item1;
-                horizon = d.Item2;
-                return;
-            }
-            top = SkyDim(d.Item1);
-            horizon = SkyDim(d.Item2);
+            if (weatherIsDay) { top = d.Item1; horizon = d.Item2; return; }
+            top = SkyDim(d.Item1); horizon = SkyDim(d.Item2);
         }
 
         private static Color SkyDim(Color c) => Color.FromArgb(
@@ -4494,6 +4540,28 @@ namespace MyDynamicIsland
             Math.Min(255, c.G * 11 / 255 + 11),
             Math.Min(255, c.B * 17 / 255 + 28));
 
+        // Chrome's reload: an open ring whose endpoint wears a proper arrow
+        // head pointing along the clockwise tangent, gap centred on top.
+        private static void DrawRefreshGlyph(Graphics g, Rectangle area, Color color)
+        {
+            var r = Rectangle.Inflate(area, 0, 0);
+            using var pen = new Pen(color, 1.7f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            const float start = 288, sweep = 324;           // GDI+ y-down/cw angles
+            g.DrawArc(pen, r, start, sweep);
+
+            double e = (start + sweep) * Math.PI / 180.0;   // 252° — near top, gap's left lip
+            float rx = r.Width / 2f - 0.8f, ry = r.Height / 2f - 0.8f;
+            float ex = r.X + r.Width / 2f + (float)Math.Cos(e) * rx;
+            float ey = r.Y + r.Height / 2f + (float)Math.Sin(e) * ry;
+            float dx = -(float)Math.Sin(e), dy = (float)Math.Cos(e);   // clockwise tangent
+            using var head = new SolidBrush(color);
+            g.FillPolygon(head, new[]
+            {
+                new PointF(ex + dx * 5.2f, ey + dy * 5.2f),
+                new PointF(ex - dy * 3.1f + dx * 0.6f, ey + dx * 3.1f + dy * 0.6f),
+                new PointF(ex + dy * 3.1f + dx * 0.6f, ey - dx * 3.1f + dy * 0.6f),
+            });
+        }
 
         // Collapsed face of the Today page: one vertically centred row —
         // time left, capsule right, percentage between them on hover. The
@@ -4593,9 +4661,26 @@ namespace MyDynamicIsland
             DrawTextAt(g, temp, 14F, FontStyle.Bold, Color.White, tempRect, false);
 
             var refresh = GetWeatherRefreshRect();
-            DrawTextAt(g, string.IsNullOrWhiteSpace(weatherCity) ? "Set location" : weatherCity,
-                8.5F, FontStyle.Bold, Color.FromArgb(190, 190, 198),
-                new Rectangle(weatherCol.X + 6, h - 40, refresh.X - 12, 16), false);
+            string cityLine = string.IsNullOrWhiteSpace(weatherCity)
+                ? "Unknown place — set a city in Settings" : weatherCity;
+            int cityMax = Math.Max(30, refresh.X - weatherCol.X - 14);
+            for (float fs = 8.5F; ; fs -= 0.4F)
+            {
+                var fnt = CachedFont("Segoe UI", fs, FontStyle.Bold);
+                int cwpx = TextRenderer.MeasureText(g, cityLine, fnt,
+                    new Size(int.MaxValue, 16),
+                    TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+                bool lastTry = fs <= 6.9F;
+                if (cwpx <= cityMax || lastTry)
+                {
+                    TextRenderer.DrawText(g, cityLine, fnt,
+                        new Rectangle(weatherCol.X + 6, h - 40, cityMax, 16),
+                        Color.FromArgb(205, 222, 226, 234),
+                        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+                        | TextFormatFlags.VerticalCenter | (lastTry ? TextFormatFlags.EndEllipsis : (TextFormatFlags)0));
+                    break;
+                }
+            }
 
             // Refresh: 14px circle-arrow beside the city name; flashes on press.
             float rp = GetPressFlash(5);
@@ -4693,13 +4778,18 @@ namespace MyDynamicIsland
 
             void Cloud(float ox, float oy, float scale, Color fill)
             {
-                float cw = d * 0.82f * scale, ch = d * 0.46f * scale;
+                // Real cloud iconography: bumps whose bottoms ALIGN on one
+                // flat base line, a taller crown in the middle, soft sides —
+                // the old version floated bubbles of near-equal size, which
+                // reads as a cluster, never as a cloud.
+                float sc = d * 0.70f * scale;
+                float x0 = cx + ox - sc / 2f;
+                float baseY = cy + oy + sc * 0.20f;
                 using var path = new GraphicsPath();
-                path.AddEllipse(cx + ox - cw / 2, cy + oy - ch / 2 + ch * 0.15f, ch * 0.92f, ch * 0.92f);
-                path.AddEllipse(cx + ox - cw / 2 + cw * 0.28f, cy + oy - ch / 2, ch * 1.02f, ch * 1.02f);
-                path.AddEllipse(cx + ox - cw / 2 + cw * 0.52f, cy + oy - ch / 2 + ch * 0.12f, ch * 0.94f, ch * 0.94f);
-                path.AddRectangle(new RectangleF(cx + ox - cw / 2 + cw * 0.28f, cy + oy - ch / 2 + ch * 0.42f,
-                    cw * 0.5f, ch * 0.55f));
+                path.AddEllipse(x0, baseY - sc * 0.40f, sc * 0.42f, sc * 0.42f);                 // left bump
+                path.AddEllipse(x0 + sc * 0.21f, baseY - sc * 0.68f, sc * 0.60f, sc * 0.60f);    // crown
+                path.AddEllipse(x0 + sc * 0.56f, baseY - sc * 0.38f, sc * 0.44f, sc * 0.44f);   // right bump
+                path.AddRectangle(new RectangleF(x0 + sc * 0.04f, baseY - sc * 0.22f, sc * 0.92f, sc * 0.22f));
                 using var brush = new SolidBrush(fill);
                 g.FillPath(brush, path);
             }
@@ -4991,10 +5081,12 @@ namespace MyDynamicIsland
                 Math.Max(1, timelineTrack.X - 24), 20);
             var remainingRect = new Rectangle(timelineTrack.Right + 8, timelineTrack.Y - 8,
                 Math.Max(1, w - timelineTrack.Right - 24), 20);
-            DrawTextAt(g, FormatTime(currentPosition), 7.5F, FontStyle.Regular,
-                Color.FromArgb(160, 160, 168), playedRect, false, true);
+            // list #2: the clock digits now wear the cover's own accent —
+            // same family as the progress fill, no more dead-gray pair
+            DrawTextAt(g, FormatTime(currentPosition), 7.5F, FontStyle.Bold,
+                albumAccentColor, playedRect, false, true);
             DrawTextAt(g, trackDuration > TimeSpan.Zero ? $"-{FormatTime(remaining)}" : "--:--",
-                7.5F, FontStyle.Regular, Color.FromArgb(160, 160, 168), remainingRect, false);
+                7.5F, FontStyle.Bold, albumAccentColor, remainingRect, false);
 
             using var controlBrush = new SolidBrush(Color.White);
             using var mutedBrush = new SolidBrush(Color.FromArgb(125, 125, 132));
@@ -5145,6 +5237,48 @@ namespace MyDynamicIsland
                 Color.FromArgb(226, 226, 232),
                 TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.WordBreak
                 | TextFormatFlags.PathEllipsis | TextFormatFlags.PreserveGraphicsClipping);
+        }
+
+        // ═══ iOS-style toast ═══
+        // ask-card sized, a real app icon as the opener, bold sender, wrapped
+        // message, a hushed "now/2m" at the right — restrained glass, and
+        // the icon falls back to a tinted letter tile when an app sends none
+        private void DrawToastCard(Graphics g)
+        {
+            int w = PillWidth, h = Height;
+
+            var iconBox = new Rectangle(14, (h - 44) / 2, 44, 44);
+            if (toastAppIcon != null)
+            {
+                using (var clip = RoundedRegion(iconBox, 12))
+                {
+                    Region? prev = g.Clip;
+                    g.Clip = clip;
+                    g.DrawImage(toastAppIcon, iconBox);
+                    g.Clip = prev;
+                }
+            }
+            else
+            {
+                using (var tile = new SolidBrush(TintForApp(transientTitle)))
+                using (var path = RoundedRectangle(iconBox, 12))
+                    g.FillPath(tile, path);
+                DrawTextAt(g, FirstLetter(transientTitle), 15F, FontStyle.Bold, Color.White, iconBox, true);
+            }
+
+            int textX = iconBox.Right + 12;
+            int textW = Math.Max(20, w - textX - 58);
+            DrawTextAt(g, transientTitle, 10.5F, FontStyle.Bold, Color.White,
+                new Rectangle(textX, 16, textW, 18), false);
+            DrawTextAt(g, NotificationWhen, 8F, FontStyle.Regular, Color.FromArgb(150, 150, 158),
+                new Rectangle(w - 56, 18, 44, 14), false, rightAlign: true);
+
+            var body = new Rectangle(textX, 36, textW, h - 46);
+            var bodyFont = CachedFont("Segoe UI", 9.2F, FontStyle.Regular);
+            TextRenderer.DrawText(g, transientDetail, bodyFont, body,
+                Color.FromArgb(226, 226, 232),
+                TextFormatFlags.NoPadding | TextFormatFlags.Left | TextFormatFlags.WordBreak
+                | TextFormatFlags.PreserveGraphicsClipping | TextFormatFlags.EndEllipsis);
         }
 
         // The strip that closes each transient and reopens as the banner header.

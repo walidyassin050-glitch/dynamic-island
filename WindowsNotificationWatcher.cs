@@ -1,5 +1,7 @@
 using System;
+using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.UI.Notifications;
 using Windows.UI.Notifications.Management;
 
@@ -25,7 +27,7 @@ namespace MyDynamicIsland
         public event Action<AccessState>? AccessResolved;
 
         private UserNotificationListener? listener;
-        public event Action<string, string>? NotificationReceived;
+        public event Action<string, string, byte[]>? NotificationReceived;
 
         private void SetAccess(AccessState state)
         {
@@ -100,11 +102,35 @@ namespace MyDynamicIsland
                 if (string.IsNullOrWhiteSpace(message))
                     message = "New notification";
 
-                NotificationReceived?.Invoke(appName, message);
+                // The real sender icon: DisplayInfo.Logo is the same image the
+                // Action Center tiles wear. It can legitimately be big; 3 MB
+                // and a 128px downscale later keep a rogue toast from eating
+                // RAM in a tray app.
+                byte[]? logo = await TryReadLogoAsync(notification);
+
+                NotificationReceived?.Invoke(appName, message, logo);
             }
             catch
             {
             }
+        }
+
+        private static async Task<byte[]?> TryReadLogoAsync(UserNotification notification)
+        {
+            try
+            {
+                // GetLogo(size), not a Logo property — same call shape the
+                // media-session icon reader already uses.
+                var logoRef = notification.AppInfo?.DisplayInfo?.GetLogo(new Windows.Foundation.Size(44, 44));
+                if (logoRef == null) return null;
+                using Windows.Storage.Streams.IRandomAccessStream stream = await logoRef.OpenReadAsync();
+                if (stream.Size == 0 || stream.Size > 3_000_000) return null;
+                using var ms = new MemoryStream();
+                stream.AsStream().CopyTo(ms);
+                ms.Position = 0;
+                return ms.ToArray();
+            }
+            catch { return null; }   // plenty of apps ship no logo; glyph tile covers
         }
 
         private static string ExtractText(UserNotification notification, string bindingTemplate)

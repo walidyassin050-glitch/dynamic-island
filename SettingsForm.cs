@@ -70,6 +70,21 @@ namespace MyDynamicIsland
         [DllImport("user32.dll")]
         static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 
+        // The whole window is painted into one off-screen buffer before Windows
+        // shows it (WS_EX_COMPOSITED). With two hundred child labels/switches,
+        // the plain path re-erases and re-draws region-by-region per wheel
+        // notch — which is the scroll lag felt on this dialog. Composited, the
+        // GPU carries one texture and scrolling becomes what it should be.
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x02000000;   // WS_EX_COMPOSITED
+                return cp;
+            }
+        }
+
         public SettingsForm(AppSettings current, string notificationStatus, string spotifyStatus = "")
         {
             DoubleBuffered = true;
@@ -197,7 +212,8 @@ namespace MyDynamicIsland
             y = SectionTitle(body, "System events", "popups that borrow the notch", y);
             var events = AddCard(body, y);
             bool notifBad = notifStatus.Contains("denied", StringComparison.OrdinalIgnoreCase) ||
-                            notifStatus.Contains("failed", StringComparison.OrdinalIgnoreCase);
+                            notifStatus.Contains("failed", StringComparison.OrdinalIgnoreCase) ||
+                            notifStatus.Contains("unavailable", StringComparison.OrdinalIgnoreCase);
             notifSw = events.AddRow("bell", TileBlue, "Windows notifications → island", notifStatus,
                 c.WindowsNotifications, notifBad ? WarnAmber : GoodGreen);
             networkSw = events.AddRow("wifi", TileSky, "Network connect / disconnect", "", c.NetworkChanges);
@@ -216,7 +232,40 @@ namespace MyDynamicIsland
                 catch { }
             };
             body.Controls.Add(privacy);
-            y = privacy.Bottom + 16;
+            var update = Link("\u22a7 Check GitHub for an updated version");
+            update.Location = new Point(body.Left + 24, privacy.Bottom + 2);
+            update.Click += async (_, _) =>
+            {
+                update.Enabled = false;
+                update.Text = "Checking GitHub\u2026";
+                var rel = await IslandDownloads.CheckGitHubUpdateAsync(
+                    "walidyassin050-glitch/my-dynamic-island");
+                update.Enabled = true;
+                if (rel == null)
+                {
+                    update.Text = "You are on the newest published version.";
+                    return;
+                }
+                var yes = MessageBox.Show(this,
+                    $"Version {rel.Value.tag} is available. Download {rel.Value.file} to your Downloads folder?",
+                    "Update", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (yes != DialogResult.Yes)
+                {
+                    update.Text = "Download skipped \u2014 the island kept its manners.";
+                    return;
+                }
+                string dest = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    "Downloads", rel.Value.file);
+                IslandDownloads.Start(rel.Value.url, dest, rel.Value.file);
+                update.Text = "Downloading \u2014 live progress is on the island.";
+            };
+            body.Controls.Add(update);
+            var demo = Link("\u25b7 Preview the download page (simulated transfer)");
+            demo.Location = new Point(body.Left + 24, update.Bottom + 2);
+            demo.Click += (_, _) => IslandDownloads.StartDemo();
+            body.Controls.Add(demo);
+            y = demo.Bottom + 16;
 
             // ═══ INTELLIGENCE ═══
             y = SectionTitle(body, "Intelligence", "the search page's two wires", y);
